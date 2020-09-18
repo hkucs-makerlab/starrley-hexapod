@@ -122,6 +122,7 @@ const char *Version = "#RV2r1a";
 #include <Servo.h>
 #include <EEPROM.h>
 
+
 byte SomeLegsUp = 0;  // this is a flag to detect situations where a user rapidly switches moves that would
 // cause the robot to try to come up off the ground using fewer than all the legs
 //(and thus over-stressing the servos).
@@ -133,16 +134,26 @@ byte SomeLegsUp = 0;  // this is a flag to detect situations where a user rapidl
 // This is not needed for analog servos and it is not needed for the Vorpal MG90 branded servos.
 //
 //#define __DEBUG__
+//#define __VORPAL_FRAME__
 //#define __ULTRA_SND__
+#define __GO_BLE__
 
+#ifdef __GO_BLE__
+#include "GoBLE.h"
+#define CONSOLE_BAUD 115200
+#define BLUETOOTH_BAUD 115200
+#else 
+#define CONSOLE_BAUD 38400
+#define BLUETOOTH_BAUD 38400
+#endif
 
 // pins assignment
 #ifdef __ULTRA_SND__
 #define ULTRAOUTPUTPIN A0    // TRIG
 #define ULTRAINPUTPIN  A1     // ECHO
 #endif
-#define BeeperPin A2 // digital A2 used for beeper
-#define DIAL_PIN A3 // potentiometer
+#define BeeperPin A2           // digital A2 used for beeper
+#define DIAL_PIN A3
 #ifdef __DEBUG__
 #include <SoftwareSerial.h>
 #define BT_TX A4
@@ -311,8 +322,6 @@ int Dialmode;   // What's the robot potentiometer set to?
 //
 
 #define Console Serial
-#define CONSOLE_BAUD 38400
-#define BLUETOOTH_BAUD 38400
 /*
   #define BlueTooth Serial
   #define BLUETOOTH_BAUD CONSOLE_BAUD
@@ -1865,6 +1874,53 @@ byte submode = SUBMODE_1;     // standard submode.
 byte timingfactor = 1;   // default is full speed. If this is greater than 1 it multiplies the cycle time making the robot slower
 short priorDialMode = -1;
 
+#ifdef __GO_BLE__
+volatile bool stopBluetooth = false;
+int receiveDataHandler() {
+  int rc = 0;
+
+  if (Goble.available()) {
+    BlueTooth.end();
+    rc = stopBluetooth = 1;
+    int joystickX, joystickY;
+    joystickY = Goble.readJoystickY();
+    joystickX = Goble.readJoystickX();
+
+    if (joystickX > 190)
+      lastCmd = 'f'; // FORWARD;
+    else if (joystickX < 80)
+      lastCmd = 'b'; // BACKWARD;
+    else if (joystickY > 190)
+      lastCmd = 'r'; // RIGHT;
+    else if (joystickY < 80)
+      lastCmd = 'l'; // LEFT;
+    else
+      lastCmd = 's';
+    //
+    if (Goble.readSwitchUp() == PRESSED)
+      submode = SUBMODE_1;
+    else if (Goble.readSwitchDown() == PRESSED)
+      submode = SUBMODE_2;
+    else if (Goble.readSwitchLeft() == PRESSED)
+      submode = SUBMODE_3;
+    else if (Goble.readSwitchRight() == PRESSED)
+      submode = SUBMODE_4;;
+    //
+    if (Goble.readSwitchSelect() == PRESSED) {
+      mode = MODE_WALK;
+      submode = SUBMODE_1;
+      lastCmd = 's';
+    } else if (Goble.readSwitchStart() == PRESSED) {
+      mode = MODE_DANCE;
+      submode = SUBMODE_1;
+      lastCmd = 's';
+    }
+    LastValidReceiveTime = millis();
+  }
+  return rc;
+}
+
+#else //  not __GO_BLE__
 int receiveDataHandler() {
 
   while (BlueTooth.available() > 0) {
@@ -2016,6 +2072,7 @@ int receiveDataHandler() {
 
   return 0; // no new data arrived
 }
+#endif // __GO_BLE__
 
 unsigned int LastGgaittype;
 unsigned int LastGreverse;
@@ -2066,6 +2123,7 @@ inline void dumpPacket() { // this is purely for debugging, it can cause timing 
   Console.println("");
 #endif
 }
+
 
 void processPacketData() {
   unsigned int i = 0;
@@ -2665,6 +2723,7 @@ void loop() {
       Console.println("");
 #endif
     }
+    
     int gotnewdata = receiveDataHandler();  // handle any new incoming data first
     //Console.print(gotnewdata); Console.print(" ");
 
@@ -2674,7 +2733,7 @@ void loop() {
     if (millis() > LastValidReceiveTime + 1000) {
       if (millis() > LastValidReceiveTime + 15000) {
         // after 15 full seconds of not receiving a valid command, reset the bluetooth connection
-        
+
 #ifdef __DEBUG__
         Console.println("Loss of Signal: not receiving any commands from gamepad.");
 #endif
@@ -2685,19 +2744,20 @@ void loop() {
         beep(400, 40);
         delay(100);
         beep(600, 40);
-//        BlueTooth.end();
-//        BlueTooth.begin(BLUETOOTH_BAUD);
-
         LastReceiveTime = LastValidReceiveTime = millis();
+#ifndef __GO_BLE__
         lastCmd = 's';  // for safety put it in stop of walk mode
-        mode='W';
-        submode='1';               
+        mode = 'W';
+        submode = '1';
+#endif
       }
       long losstime = millis() - LastValidReceiveTime;
 #ifdef __DEBUG__
       //Console.print("LOS "); Console.println(losstime);  // LOS stands for "Loss of Signal"
 #endif
+#ifndef __GO_BLE__
       return;  // don't repeat commands if we haven't seen valid data in a while
+#endif
     }
 
     if (gotnewdata == 0) {
@@ -2743,7 +2803,6 @@ void loop() {
     //
     // Now we're either repeating the last command, or reading the new bluetooth command
     //
-
     ScamperTracker -= 1;
     if (ScamperTracker < 0) {
       ScamperTracker = 0;
@@ -2949,13 +3008,11 @@ void loop() {
         } else if (mode == MODE_DANCE && submode == SUBMODE_4) {
           dance_hands(lastCmd);
         } else {
-          /*
-                    if (millis() - startedStanding > BATTERYSAVER) {
-                      //Console.print("DET LC=");Console.write(lastCmd); Console.println("");
-                      detach_all_servos();
-                      return;
-                    }
-          */
+          //          if (millis() - startedStanding > BATTERYSAVER) {
+          //            //Console.print("DET LC=");Console.write(lastCmd); Console.println("");
+          //            detach_all_servos();
+          //            return;
+          //          }
           stand();
         }
         break;
@@ -2971,4 +3028,12 @@ void loop() {
         beep(100, 20);
     }  // end of switch
   }  // end of main if statement
+
+  //
+#ifdef __GO_BLE__
+  if (stopBluetooth && millis() > LastValidReceiveTime + 100  ) {
+    BlueTooth.begin(BLUETOOTH_BAUD);
+    stopBluetooth = false;
+  }
+#endif
 }
